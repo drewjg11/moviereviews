@@ -1,0 +1,47 @@
+version: "3.9"
+services:
+  cache:
+    image: redis
+    ports:
+      - 6379:6379
+  db:
+    image: postgres:10.14
+    ports:
+      - 5432:5432
+    volumes:
+      - dbdata:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_PASSWORD=backend
+      - POSTGRES_USER=backend
+      - POSTGRES_DB=moviereviews
+  smtp:
+    build: docker/images/smtp
+    ports:
+      - 1025:1025
+      - 8025:8025
+  api:
+    build:
+      dockerfile: docker/images/api/Dockerfile
+      context: .
+      target: devGrade
+    volumes:
+      - ./config:/var/config
+      - ./docker:/var/docker
+      - ./src:/var/task
+    command: >
+      sh -c "/var/docker/images/api/wait_for_it.sh db:5432 -- echo DB IS UP!!! &&
+             python /var/task/manage.py migrate &&
+             python /var/task/manage.py collectstatic --no-input &&
+             uwsgi /var/config/uwsgi.ini"
+    entrypoint: []
+    ports:
+      - 8000:8000
+      - 9191:9191
+    depends_on:
+      - cache
+      - db
+      - smtp
+    links:
+      - db:database
+volumes:
+  dbdata:

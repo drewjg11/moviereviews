@@ -1,0 +1,323 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Pipeline Stack
+Resources:
+  SSMParams:
+    Type: AWS::CloudFormation::CustomResource
+    Properties:
+      ServiceToken: arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:get_latest_ssm_params
+      ResourceProperties:
+        UUID: !Ref UUID # passing a unique id each time insures this is runs everytime
+        Latest: [
+          {"callback": "ControllerArn",       "path": !Sub "/sans/jumpstart/roles/${Scope}/controller/admin/arn"},
+          {"callback": "CodePipelineArn",     "path": !Sub "/sans/jumpstart/roles/${Scope}/codepipeline/admin/arn"},
+          {"callback": "CodeBuildArn",        "path": !Sub "/sans/jumpstart/roles/${Scope}/codebuild/admin/arn"},
+          {"callback": "LambdaArn",           "path": !Sub "/sans/jumpstart/roles/${Scope}/lambda/admin/arn"},
+          {"callback": "KmsArn",              "path": !Sub "/sans/jumpstart/${Scope}/kms/arn"},
+          {"callback": "ControllerAccountId", "path": !Sub "/sans/${Lane}/controller/accountid"},
+          {"callback": "BuildsBucket",        "path": !Sub "/sans/jumpstart/${Scope}/s3/buildsbucket"},
+          {"callback": "GitHubOrgName",       "path": "/sans/jumpstart/github/org/name"},
+          {"callback": "SubNetPrivateA",      "path": !Sub "/sans/${Lane}/${Scope}/${Level}/vpc/subnets/private/a/id"},
+          {"callback": "SubNetPrivateB",      "path": !Sub "/sans/${Lane}/${Scope}/${Level}/vpc/subnets/private/b/id"},
+          {"callback": "VpcId",               "path": !Sub "/sans/${Lane}/${Scope}/${Level}/vpc/id"},
+          {"callback": "CidrRange",           "path": !Sub "/sans/${Lane}/${Scope}/${Level}/vpc/subnets/cidr/range"}
+          ]
+
+  CodePipeline: # IMPORTANT - Do not change this resource name
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      RoleArn: !GetAtt SSMShim.CodePipelineArn
+      RestartExecutionOnUpdate: true
+
+      Stages: # Pull all sources
+        - Name: Sources
+          Actions:
+            - Name: !Ref ParentRepo
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: "1"
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: ParentRepo
+              Configuration:
+                Owner: !GetAtt SSMShim.GitHubOrgName
+                Repo: !Ref ParentRepo
+                PollForSourceChanges: false
+                Branch: !Ref StreamMachine
+                OAuthToken: '{{resolve:secretsmanager:/sans/jumpstart/secrets/github:SecretString:github}}'
+              RunOrder: 1
+            - Name: Lumen
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Version: "1"
+                Provider: GitHub
+              OutputArtifacts:
+                - Name: LumenRepo
+              Configuration:
+                Owner: !GetAtt SSMShim.GitHubOrgName
+                Repo: stream-machine-lumen
+                PollForSourceChanges: false
+                Branch: !Ref StreamMachineLumen
+                OAuthToken: '{{resolve:secretsmanager:/sans/jumpstart/secrets/github:SecretString:github}}'
+              RunOrder: 1
+        - Name: CodePipeline
+          Actions:
+            - InputArtifacts:
+                - Name: ParentRepo
+              Name: pipeline
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: "1"
+              OutputArtifacts:
+                - Name: pipelineArtifacts
+              Configuration:
+                StackName: !Ref "AWS::StackName" # IMPORTANT: Make sure only the pipeline.yml uses "AWS::StackName" for the StackName
+                ActionMode: CREATE_UPDATE
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                TemplatePath: "ParentRepo::cloudformations/pipeline.yml"
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}",
+                    "StreamMachine" : "${StreamMachine}",
+                    "StreamMachineLumen" : "${StreamMachineLumen}"
+                  }
+              RunOrder: 1
+        - Name: Provision
+          Actions:
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-","codebuild" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: codebuild_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}",
+                    "BuildSpec": "buildspecs/buildspec.yml"}'
+                  }
+                TemplatePath: ParentRepo::cloudformations/codebuild.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: codebuild
+              OutputArtifacts:
+                - Name: codebuild_artifacts
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-","ecr" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: ecr_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}"
+                  }
+                TemplatePath: ParentRepo::cloudformations/ecr.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: ecr
+              OutputArtifacts:
+                - Name: ecr_artifacts
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-dynamoDB" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: dynamoDB_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}"
+                  }
+                TemplatePath: ParentRepo::cloudformations/dynamodb.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: dynamoDB
+              OutputArtifacts:
+                - Name: dynamoDB_artifacts
+              RunOrder: 2
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-lambda-fargateTask" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: lambdaCustomFargate_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}"
+                  }
+                TemplatePath: ParentRepo::cloudformations/lambda-customFargateTask.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: lambdaCustomFargate
+              OutputArtifacts:
+                - Name: lambdaCustomFargate_artifacts
+              RunOrder: 1
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-sg-vpc" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: sg-vpc_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}"
+                  }
+                TemplatePath: ParentRepo::cloudformations/sg-vpc.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: sg-vpc
+              OutputArtifacts:
+                - Name: sg-vpc_artifacts
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - InputArtifacts:
+                - Name: ParentRepo
+                - Name: LumenRepo
+              Name: !Ref ParentRepo
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: "1"
+              OutputArtifacts:
+                - Name: !Sub '${ParentRepo}-build-artifacts'
+              RoleArn: !GetAtt SSMShim.CodePipelineArn
+              Configuration:
+                ProjectName: !Sub '${Level}-${ParentRepo}'
+                PrimarySource: ParentRepo
+              RunOrder: 1
+        - Name: Deploy
+          Actions:
+            - ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              Configuration:
+                RoleArn: !GetAtt SSMShim.CodePipelineArn
+                StackName: !Join [ "", [ !Ref Level,"-",!Ref ParentRepo,"-","fargate" ] ]
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_IAM,CAPABILITY_AUTO_EXPAND,CAPABILITY_NAMED_IAM
+                OutputFileName: fargate_outputs.json
+                ParameterOverrides: !Sub |
+                  {
+                    "Level" : "${Level}",
+                    "Scope" : "${Scope}",
+                    "ParentRepo" : "${ParentRepo}",
+                    "UUID" : "#{codepipeline.PipelineExecutionId}"
+                  }
+                TemplatePath: ParentRepo::cloudformations/fargate.yml
+              InputArtifacts:
+                - Name: ParentRepo
+              Name: fargate
+              OutputArtifacts:
+                - Name: fargate_artifacts
+              RunOrder: 1
+        - Name: Promotion
+          Actions:
+            - InputArtifacts:
+                -
+                  Name: ParentRepo
+                -
+                  Name: LumenRepo
+              Name: promote
+              ActionTypeId:
+                Category: Invoke
+                Owner: AWS
+                Provider: Lambda
+                Version: "1"
+              RoleArn: !GetAtt SSMShim.CodePipelineArn
+              Configuration:
+                FunctionName: !Sub '${Level}-jumpstart_promote'
+                UserParameters: !Join [ "",
+                  [ '{"GitOrgName": "',
+                    !GetAtt SSMShim.GitHubOrgName,
+                    '","AccountId": "',
+                    !Ref "AWS::AccountId",
+                    '","Level": "',
+                    !Ref Level,
+                    '","Scope": "',
+                    !Ref Scope,
+                    '","Lane": "',
+                    !Ref Lane,
+                    '","ParentRepo": "',
+                    !Ref ParentRepo,
+                    '","Commits": ',
+                    !GetAtt Commits.Github,'}' ] ]
+              OutputArtifacts:
+                - Name: promoteInvokeArtifacts
+              RunOrder: 1
+
+      ArtifactStore:
+        Type: S3
+        Location: !Ref S3AssetsBucket
+        EncryptionKey:
+          Id: !GetAtt SSMShim.KmsArn
+          Type: KMS
+
+  ParentRepoWebhook: # NOTE: Another Webhook resource block must be created for each repo included with this Application
+    Type: AWS::CodePipeline::Webhook
+    Properties:
+      Authentication: GITHUB_HMAC
+      AuthenticationConfiguration:
+        SecretToken: '{{resolve:secretsmanager:/sans/jumpstart/secrets/github:SecretString:github}}'
+      Filters:
+        -
+          JsonPath: "$.ref"
+          MatchEquals: refs/heads/{Branch}
+        - JsonPath: "$.repository.name"
+          MatchEquals: "{Repo}"
+      TargetPipeline: !Ref CodePipeline
+      TargetAction: !Ref ParentRepo
+      Name: !Sub '${Level}-${ParentRepo}-webhook'
+      TargetPipelineVersion: !GetAtt CodePipeline.Version
+      RegisterWithThirdParty: true

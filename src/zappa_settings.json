@@ -1,0 +1,24 @@
+{
+  "common": {
+    "aws_region": "us-east-1",
+    "lambda_description": "Zappa + Docker + Django",
+    "project_name": "XX",
+    "s3_bucket": "com.XXXXXXX.artifacts",
+    "timeout_seconds": 900,
+    "certificate_arn": "arn:aws:acm:us-east-1:702175707031:certificate/d3b1c5b4-7cc3-4aae-b270-decf548c1517",
+    "vpc_config": {
+      "SubnetIds": [
+        "subnet-0b8f79dd0d89042fc"
+      ],
+      "SecurityGroupIds": [
+        "sg-0961ffcce73d840f2"
+      ]
+    }
+  },
+  "develop": {
+    "extends": "common",
+    "domain": "api.develop.XXXXXX.com",
+    "django_settings": "backend.settings.develop",
+    "keep_warm": false
+  }
+}

@@ -1,0 +1,48 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+django = "==3.2a1"
+django-cors-headers = "*"
+django-environ = "*"
+django-filter = "*"
+djangorestframework = "*"
+dj-rest-auth = {version = "*", extras = [ "with_social",]}
+drf-extensions = "*"
+psycopg2-binary = "*"
+uwsgi = "*"
+pyjwt = "*"
+django-guardian = "*"
+pydash = "*"
+djangorestframework-serializer-extensions = "*"
+zappa = "*"
+djangorestframework-simplejwt = "*"
+rollbar = "*"
+troposphere = "==2.7.0"
+
+[dev-packages]
+argh = "*"
+bandit = "*"
+coverage = "*"
+django-debug-toolbar = "*"
+django-extensions = "*"
+django-su = "*"
+factory_boy = "*"
+markdown = "*"
+pip-tools = "*"
+pydot = "*"
+pygments = "*"
+pylint = "*"
+pylint-django = "*"
+pyparsing = "*"
+pytest = "*"
+pytest-django = "*"
+pyyaml = "*"
+
+[requires]
+python_version = "3.8"
+
+[pipenv]
+allow_prereleases = true
